@@ -226,6 +226,33 @@ def publish_to_drupal(drupal_url, api_token, payloads):
 5. CLI saves response to `output/design_*.json`
 6. If `action: publish_to_drupal`, CLI executes payloads against Drupal
 
+### Tool Parameter Schema
+
+Agents know which parameters to use via `tools.md` - a JSON Schema catalog. Each tool defines:
+
+```json
+{
+  "Tool: create_design_system": {
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "industry": {"type": "string"},
+        "style_direction": {"enum": ["minimal", "corporate", "creative", "premium", "playful"]},
+        "accessibility_level": {"enum": ["AA", "AAA"], "default": "AA"}
+      },
+      "required": ["industry", "style_direction"]
+    }
+  }
+}
+```
+
+**How the LLM knows parameters:**
+
+1. `tools.md` is loaded and appended to the system prompt
+2. The LLM reads parameter schemas during inference
+3. Agent responds with valid parameters based on the schema
+4. CLI validates parameters match the schema before executing Python functions
+
 ## Agent Structure
 
 Each agent folder contains:
@@ -235,8 +262,18 @@ agent_*/
 ├── agent.md              # Agent identity, config, state schema
 ├── system_prompt.md      # LLM instructions (role, workflow, rules)
 ├── tools.md              # Tool catalog with JSON parameters
-└── implementation_plan.md # Drupal-specific implementation steps
+├── implementation_plan.md # Drupal-specific implementation steps
+└── {agent}.py          # Agent-specific Python functions
 ```
+
+### Agent Module Functions
+
+Each `{agent}.py` contains domain-specific functions:
+
+- `publish_to_drupal()` - Publish content/config to Drupal
+- `generate_theme_files()` - Create theme file structure (design agent)
+- `generate_twig_template()` - Create Twig templates (component agent)
+- `assemble_website()` - Full site assembly (assembly agent)
 
 ### agent.md
 - Agent ID and version
@@ -328,4 +365,4 @@ To add a new agent:
 
 ## License
 
-MIT - Inventions4All - github:TWeb79# Drupal-agents
+MIT - Inventions4All - github:TWeb79

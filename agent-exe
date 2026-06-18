@@ -1,0 +1,352 @@
+#!/usr/bin/env python3
+"""
+agent-exe: CLI launcher for Drupal AI agents.
+
+Usage:
+    agent-exe <agent> [options]
+    agent-exe list
+    agent-exe --help
+
+Examples:
+    agent-exe design
+    agent-exe component
+    agent-exe assembly
+    agent-exe design --goal "Create a healthcare theme"
+    agent-exe component --goal "Build a pricing table component"
+    agent-exe assembly --goal "Assemble a SaaS startup website"
+    agent-exe assembly --publish --drupal-url "https://example.com" --api-token "TOKEN" --goal "Build my site"
+    agent-exe design -llm nvidia --goal "Create a theme"
+"""
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+import urllib.request
+import urllib.error
+
+AGENTS_DIR = os.path.dirname(os.path.abspath(__file__))
+
+AGENTS = {
+    "design": {
+        "folder": "agent_design",
+        "label": "Theme Design Agent",
+        "description": "Design and architect Drupal 11 themes and design systems",
+    },
+    "component": {
+        "folder": "agent_component",
+        "label": "Component Development Agent",
+        "description": "Create and maintain reusable Drupal components",
+    },
+    "assembly": {
+        "folder": "agent_assembly",
+        "label": "Website Assembly Agent",
+        "description": "Assemble complete Drupal websites from building blocks",
+    },
+}
+
+LLM_PROVIDERS = {
+    "ollama": {
+        "url": "http://localhost:11434",
+        "model": "qwen3.5:9b",
+        "key_env": None,
+    },
+    "nvidia": {
+        "url": "https://integrate.api.nvidia.com/v1",
+        "model": "openai/gpt-oss-20b",
+        "key_env": "NVIDIA_API_KEY",
+        "default_key": "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",
+    },
+}
+
+OLLAMA_URL = LLM_PROVIDERS["ollama"]["url"]
+OLLAMA_MODEL = LLM_PROVIDERS["ollama"]["model"]
+OUTPUT_DIR = "output"
+
+
+def agent_md_path(agent_key: str) -> str:
+    return os.path.join(AGENTS_DIR, AGENTS[agent_key]["folder"], "agent.md")
+
+
+def system_prompt_path(agent_key: str) -> str:
+    return os.path.join(AGENTS_DIR, AGENTS[agent_key]["folder"], "system_prompt.md")
+
+
+def read_file(path: str) -> str:
+    with open(path, "r", encoding="utf-8") as f:
+        return f.read()
+
+
+def check_ollama(model: str = None) -> bool:
+    model_name = model or LLM_PROVIDERS["ollama"]["model"]
+    try:
+        req = urllib.request.Request(f"{LLM_PROVIDERS['ollama']['url']}/api/tags")
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            data = json.loads(resp.read())
+            models = [m["name"] for m in data.get("models", [])]
+            return any(model_name in m for m in models)
+    except (urllib.error.URLError, Exception):
+        return False
+
+
+def pull_model(model: str = None):
+    model_name = model or LLM_PROVIDERS["ollama"]["model"]
+    print(f"Pulling {model_name}...")
+    subprocess.run(["ollama", "pull", model_name], check=True)
+
+
+def call_ollama(system_prompt: str, user_message: str, temperature: float = 0.3, model: str = None, url: str = None) -> str:
+    model_name = model or OLLAMA_MODEL
+    api_url = url or OLLAMA_URL
+    payload = json.dumps({
+        "model": model_name,
+        "system": system_prompt,
+        "prompt": user_message,
+        "stream": False,
+        "options": {
+            "temperature": temperature,
+            "num_predict": 8192,
+        },
+    }).encode("utf-8")
+
+    req = urllib.request.Request(
+        f"{api_url}/api/generate",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=300) as resp:
+        data = json.loads(resp.read())
+        return data.get("response", "")
+
+
+def call_nvidia(system_prompt: str, user_message: str, temperature: float = 0.3) -> str:
+    api_key = os.environ.get(LLM_PROVIDERS["nvidia"]["key_env"]) or LLM_PROVIDERS["nvidia"].get("default_key")
+    if not api_key:
+        raise ValueError(f"{LLM_PROVIDERS['nvidia']['key_env']} environment variable not set")
+    
+    payload = json.dumps({
+        "model": LLM_PROVIDERS["nvidia"]["model"],
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_message},
+        ],
+        "temperature": temperature,
+        "max_tokens": 8192,
+    }).encode("utf-8")
+
+    req = urllib.request.Request(
+        f"{LLM_PROVIDERS['nvidia']['url']}/chat/completions",
+        data=payload,
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=300) as resp:
+            data = json.loads(resp.read())
+            return data.get("choices", [{}])[0].get("message", {}).get("content", "")
+    except Exception as e:
+        return f"Error calling NVIDIA API: {e}"
+
+
+def publish_to_drupal(drupal_url: str, api_token: str, payloads: list) -> list:
+    """Execute JSON:API payloads against a live Drupal site."""
+    results = []
+    headers = {
+        "Content-Type": "application/vnd.api+json",
+        "Accept": "application/vnd.api+json",
+        "Authorization": f"Bearer {api_token}",
+    }
+
+    for i, payload in enumerate(payloads):
+        endpoint = payload.get("endpoint", "")
+        url = f"{drupal_url.rstrip('/')}{endpoint}"
+
+        try:
+            data = json.dumps(payload.get("data", {})).encode("utf-8")
+            req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                result = json.loads(resp.read())
+                results.append({
+                    "step": i + 1,
+                    "endpoint": endpoint,
+                    "status": "success",
+                    "response": result,
+                })
+        except urllib.error.HTTPError as e:
+            results.append({
+                "step": i + 1,
+                "endpoint": endpoint,
+                "status": "error",
+                "code": e.code,
+                "response": e.read().decode(),
+            })
+        except Exception as e:
+            results.append({
+                "step": i + 1,
+                "endpoint": endpoint,
+                "status": "error",
+                "error": str(e),
+            })
+
+    return results
+
+
+def run_interactive(agent_key: str, system_prompt: str, drupal_url: str = None, api_token: str = None, llm_provider: str = "ollama"):
+    provider_info = LLM_PROVIDERS.get(llm_provider, LLM_PROVIDERS["ollama"])
+    model_name = provider_info.get("model", "unknown")
+    print(f"\n{'='*60}")
+    print(f"  {AGENTS[agent_key]['label']}")
+    print(f"  Model: {model_name} via {llm_provider}")
+    if drupal_url:
+        print(f"  Drupal API: {drupal_url}")
+    print(f"{'='*60}")
+    print("  Commands: 'quit', 'exit', 'q', or Ctrl+C to exit.\n")
+    print("  Send empty line after your response to continue.\n")
+
+    history = []
+    while True:
+        try:
+            user_input = input("You > ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\nExiting.")
+            sys.exit(0)
+
+        if not user_input:
+            continue
+        if user_input.lower() in ("quit", "exit", "q"):
+            break
+        if user_input.lower() in ("help", "?"):
+            print("  Commands: 'quit', 'exit', 'q' (Ctrl+C), or ask the agent anything.\n")
+            continue
+
+        history.append(f"User: {user_input}")
+        full_prompt = "\n".join(history) + "\nAssistant:"
+
+        print(f"\nAgent > ", end="", flush=True)
+        if llm_provider == "nvidia":
+            response = call_nvidia(system_prompt, full_prompt)
+        else:
+            response = call_ollama(system_prompt, full_prompt)
+        print(response)
+
+        # Check for publish directive in agent response
+        if drupal_url and api_token and '"action": "publish_to_drupal"' in response.lower():
+            try:
+                parsed = json.loads(response)
+                if "parameters" in parsed and "payloads" in parsed.get("parameters", {}):
+                    print("\nPublishing to Drupal...")
+                    publish_results = publish_to_drupal(
+                        drupal_url, api_token, parsed["parameters"]["payloads"]
+                    )
+                    for r in publish_results:
+                        status = "✓" if r["status"] == "success" else "✗"
+                        print(f"  {status} Step {r['step']}: {r['endpoint']} ({r['status']})")
+            except json.JSONDecodeError:
+                pass
+
+        history.append(f"Assistant: {response}")
+        print()
+
+
+def run_single(agent_key: str, system_prompt: str, goal: str, drupal_url: str = None, api_token: str = None, llm_provider: str = "ollama"):
+    provider_info = LLM_PROVIDERS.get(llm_provider, LLM_PROVIDERS["ollama"])
+    model_name = provider_info.get("model", "unknown")
+    print(f"\n{'='*60}")
+    print(f"  {AGENTS[agent_key]['label']}")
+    print(f"  Model: {model_name} via {llm_provider}")
+    if drupal_url:
+        print(f"  Drupal API: {drupal_url}")
+    print(f"{'='*60}\n")
+    print(f"Goal: {goal}\n")
+    print("---\n")
+
+    if llm_provider == "nvidia":
+        response = call_nvidia(system_prompt, goal)
+    else:
+        response = call_ollama(system_prompt, goal)
+    print(response)
+
+    # Save output
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    output_file = os.path.join(OUTPUT_DIR, f"{agent_key}_{goal.replace(' ', '_')[:30]}.json")
+    with open(output_file, "w", encoding="utf-8") as f:
+        f.write(response)
+    print(f"\n[Output saved to {output_file}]")
+
+
+def cmd_list():
+    print("\nAvailable agents:\n")
+    for key, info in AGENTS.items():
+        print(f"  {key:12s}  {info['label']}")
+        print(f"  {'':12s}  {info['description']}")
+        print()
+    print(f"  LLM Providers: {', '.join(LLM_PROVIDERS.keys())}")
+    print()
+    print("  Use: ./agent-exe run -llm nvidia design")
+    print("  Or: ./agent-exe run --llm:nvidia design")
+
+
+def cmd_models():
+    print("\nAvailable LLM providers and models:\n")
+    for provider, config in LLM_PROVIDERS.items():
+        print(f"  {provider:10s}  {config['model']}")
+    print()
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        prog="agent-exe",
+        description="Launch Drupal AI agents (ollama/nvidia providers)",
+    )
+    subparsers = parser.add_subparsers(dest="command")
+
+    subparsers.add_parser("list", help="List available agents and LLM providers")
+    subparsers.add_parser("models", help="List available LLM models")
+
+    run_parser = subparsers.add_parser("run", help="Run an agent")
+    run_parser.add_argument("agent", choices=list(AGENTS.keys()), help="Agent to run")
+    run_parser.add_argument("--llm", type=str, choices=list(LLM_PROVIDERS.keys()), default="ollama", help=f"LLM provider (default: ollama)")
+    run_parser.add_argument("--goal", "-g", type=str, default=None, help="Single goal (interactive mode if omitted)")
+    run_parser.add_argument("--model", "-m", type=str, default=None, help=f"Override model (default: provider's default model)")
+    run_parser.add_argument("--ollama-url", type=str, default=None, help=f"Override Ollama URL (default: {OLLAMA_URL})")
+    run_parser.add_argument("--publish", action="store_true", help="Publish results to Drupal site")
+    run_parser.add_argument("--drupal-url", type=str, default=None, help="Drupal base URL for publishing (https://example.com)")
+    run_parser.add_argument("--api-token", type=str, default=None, help="Drupal API token for authentication")
+
+    args = parser.parse_args()
+
+    if args.command == "list" or args.command is None:
+        cmd_list()
+        return
+
+    if args.command == "models":
+        cmd_models()
+        return
+
+    if args.command == "run":
+        agent_key = args.agent
+        llm_provider = args.llm
+
+        provider_config = LLM_PROVIDERS.get(llm_provider, LLM_PROVIDERS["ollama"])
+
+        if llm_provider == "ollama":
+            model_override = args.model or LLM_PROVIDERS["ollama"]["model"]
+            url_override = args.ollama_url or LLM_PROVIDERS["ollama"]["url"]
+            if not check_ollama(model_override):
+                print(f"Model '{model_override}' not found in Ollama.")
+                answer = input("Pull it now? [Y/n] ").strip().lower()
+                if answer in ("", "y", "yes"):
+                    pull_model(model_override)
+                else:
+                    sys.exit(1)
+
+        system_prompt = read_file(system_prompt_path(agent_key))
+
+        if args.goal:
+            run_single(agent_key, system_prompt, args.goal, args.drupal_url, args.api_token, llm_provider)
+        else:
+            run_interactive(agent_key, system_prompt, args.drupal_url, args.api_token, llm_provider)
+
+
+if __name__ == "__main__":
+    main()

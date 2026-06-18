@@ -145,6 +145,70 @@ Agents receive prompts and return structured JSON responses. When an agent needs
 
 The `agent-exe` CLI detects this action and executes the payloads via HTTP POST to your Drupal site.
 
+### Complete Example: Task to API Call
+
+**1. User Task:**
+```bash
+./agent-exe run --llm nvidia design --goal "Create homepage for luxury fashion brand"
+```
+
+**2. CLI Builds Prompt (from `system_prompt.md`):**
+```
+You are a senior Drupal Frontend Architect...
+User: Create homepage for luxury fashion brand
+Assistant:
+```
+
+**3. LLM Response (JSON):**
+```json
+{
+  "thinking": "Creating homepage with hero banner, product grid, and brand story section.",
+  "phase": "design",
+  "action": "publish_to_drupal",
+  "parameters": {
+    "payloads": [
+      {
+        "endpoint": "/jsonapi/node/page",
+        "data": {
+          "data": {
+            "type": "node--page",
+            "attributes": {
+              "title": "Home",
+              "body": {"value": "<h1>Welcome to Luxury Brand</h1>..."}
+            }
+          }
+        }
+      }
+    ]
+  },
+  "output": {
+    "deliverable_type": "theme_design",
+    "content": "Black and gold luxury theme with responsive grid layout."
+  }
+}
+```
+
+**4. CLI Executes API Call (Python function):**
+```python
+def publish_to_drupal(drupal_url, api_token, payloads):
+    headers = {
+        "Content-Type": "application/vnd.api+json",
+        "Authorization": f"Bearer {api_token}",
+    }
+    for payload in payloads:
+        url = f"{drupal_url}{payload['endpoint']}"
+        data = json.dumps(payload["data"]).encode("utf-8")
+        req = urllib.request.Request(
+            url, data=data, headers=headers, method="POST"
+        )
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            print(f"Published: {resp.read()}")
+```
+
+**5. Result:**
+- Page created in Drupal at `/jsonapi/node/page`
+- Output saved to `output/design_Create_homepage_for_luxury_fashion_brand.json`
+
 ### Authentication Flow
 
 1. **LLM Provider Selection**: `--llm ollama` (default) or `--llm nvidia`

@@ -26,6 +26,16 @@ import sys
 import urllib.request
 import urllib.error
 
+# Load environment variables from .env file if exists
+env_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+if os.path.exists(env_file):
+    with open(env_file, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                key, _, value = line.partition("=")
+                os.environ.setdefault(key.strip(), value.strip())
+
 AGENTS_DIR = os.path.dirname(os.path.abspath(__file__))
 
 AGENTS = {
@@ -56,7 +66,6 @@ LLM_PROVIDERS = {
         "url": "https://integrate.api.nvidia.com/v1",
         "model": "openai/gpt-oss-20b",
         "key_env": "NVIDIA_API_KEY",
-        "default_key": "NVIDIAKEY",
     },
 }
 
@@ -121,9 +130,9 @@ def call_ollama(system_prompt: str, user_message: str, temperature: float = 0.3,
 
 
 def call_nvidia(system_prompt: str, user_message: str, temperature: float = 0.3) -> str:
-    api_key = os.environ.get(LLM_PROVIDERS["nvidia"]["key_env"]) or LLM_PROVIDERS["nvidia"].get("default_key")
+    api_key = os.environ.get(LLM_PROVIDERS["nvidia"]["key_env"])
     if not api_key:
-        raise ValueError(f"{LLM_PROVIDERS['nvidia']['key_env']} environment variable not set")
+        return "NVIDIA_API_KEY not set. Copy .env.example to .env and add your key."
     
     payload = json.dumps({
         "model": LLM_PROVIDERS["nvidia"]["model"],
@@ -148,15 +157,39 @@ def call_nvidia(system_prompt: str, user_message: str, temperature: float = 0.3)
         return f"Error calling NVIDIA API: {e}"
 
 
-def publish_to_drupal(drupal_url: str, api_token: str, payloads: list) -> list:
+def publish_to_drupal(drupal_url: str, api_token: str = None, username: str = None, password: str = None, payloads: list = None) -> list:
     """Execute JSON:API payloads against a live Drupal site."""
-    results = []
+    if payloads is None:
+        payloads = []
+    
+    auth_header = None
+    if api_token:
+        auth_header = f"Bearer {api_token}"
+    elif username and password:
+        # Basic auth for password-based
+        import base64
+        creds = base64.b64encode(f"{username}:{password}".encode()).decode()
+        auth_header = f"Basic {creds}"
+    else:
+        # Fall back to .env
+        api_token = os.environ.get("DRUPAL_API_TOKEN")
+        if api_token:
+            auth_header = f"Bearer {api_token}"
+        else:
+            username = os.environ.get("DRUPAL_USERNAME")
+            password = os.environ.get("DRUPAL_PASSWORD")
+            if username and password:
+                creds = base64.b64encode(f"{username}:{password}".encode()).decode()
+                auth_header = f"Basic {creds}"
+    
     headers = {
         "Content-Type": "application/vnd.api+json",
         "Accept": "application/vnd.api+json",
-        "Authorization": f"Bearer {api_token}",
     }
+    if auth_header:
+        headers["Authorization"] = auth_header
 
+    results = []
     for i, payload in enumerate(payloads):
         endpoint = payload.get("endpoint", "")
         url = f"{drupal_url.rstrip('/')}{endpoint}"
@@ -191,7 +224,7 @@ def publish_to_drupal(drupal_url: str, api_token: str, payloads: list) -> list:
     return results
 
 
-def run_interactive(agent_key: str, system_prompt: str, drupal_url: str = None, api_token: str = None, llm_provider: str = "ollama"):
+def run_interactive(agent_key: str, system_prompt: str, drupal_url: str = None, api_token: str = None, username: str = None, password: str = None, llm_provider: str = "ollama"):
     provider_info = LLM_PROVIDERS.get(llm_provider, LLM_PROVIDERS["ollama"])
     model_name = provider_info.get("model", "unknown")
     print(f"\n{'='*60}")
@@ -230,13 +263,13 @@ def run_interactive(agent_key: str, system_prompt: str, drupal_url: str = None, 
         print(response)
 
         # Check for publish directive in agent response
-        if drupal_url and api_token and '"action": "publish_to_drupal"' in response.lower():
+        if drupal_url and ('"action": "publish_to_drupal"' in response.lower()):
             try:
                 parsed = json.loads(response)
                 if "parameters" in parsed and "payloads" in parsed.get("parameters", {}):
                     print("\nPublishing to Drupal...")
                     publish_results = publish_to_drupal(
-                        drupal_url, api_token, parsed["parameters"]["payloads"]
+                        drupal_url, api_token, username, password, parsed["parameters"]["payloads"]
                     )
                     for r in publish_results:
                         status = "✓" if r["status"] == "success" else "✗"
@@ -248,7 +281,7 @@ def run_interactive(agent_key: str, system_prompt: str, drupal_url: str = None, 
         print()
 
 
-def run_single(agent_key: str, system_prompt: str, goal: str, drupal_url: str = None, api_token: str = None, llm_provider: str = "ollama"):
+def run_single(agent_key: str, system_prompt: str, goal: str, drupal_url: str = None, api_token: str = None, username: str = None, password: str = None, llm_provider: str = "ollama"):
     provider_info = LLM_PROVIDERS.get(llm_provider, LLM_PROVIDERS["ollama"])
     model_name = provider_info.get("model", "unknown")
     print(f"\n{'='*60}")
@@ -282,8 +315,6 @@ def cmd_list():
         print()
     print(f"  LLM Providers: {', '.join(LLM_PROVIDERS.keys())}")
     print()
-    print("  Use: ./agent-exe run -llm nvidia design")
-    print("  Or: ./agent-exe run --llm:nvidia design")
 
 
 def cmd_models():
@@ -312,6 +343,8 @@ def main():
     run_parser.add_argument("--publish", action="store_true", help="Publish results to Drupal site")
     run_parser.add_argument("--drupal-url", type=str, default=None, help="Drupal base URL for publishing (https://example.com)")
     run_parser.add_argument("--api-token", type=str, default=None, help="Drupal API token for authentication")
+    run_parser.add_argument("--username", type=str, default=None, help="Drupal username for basic auth")
+    run_parser.add_argument("--password", type=str, default=None, help="Drupal password for basic auth")
 
     args = parser.parse_args()
 
@@ -343,9 +376,9 @@ def main():
         system_prompt = read_file(system_prompt_path(agent_key))
 
         if args.goal:
-            run_single(agent_key, system_prompt, args.goal, args.drupal_url, args.api_token, llm_provider)
+            run_single(agent_key, system_prompt, args.goal, args.drupal_url, args.api_token, args.username, args.password, llm_provider)
         else:
-            run_interactive(agent_key, system_prompt, args.drupal_url, args.api_token, llm_provider)
+            run_interactive(agent_key, system_prompt, args.drupal_url, args.api_token, args.username, args.password, llm_provider)
 
 
 if __name__ == "__main__":

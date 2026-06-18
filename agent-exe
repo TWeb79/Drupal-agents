@@ -56,7 +56,7 @@ LLM_PROVIDERS = {
         "url": "https://integrate.api.nvidia.com/v1",
         "model": "openai/gpt-oss-20b",
         "key_env": "NVIDIA_API_KEY",
-        "default_key": "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",
+        "default_key": "NVIDIAKEY",
     },
 }
 
@@ -305,7 +305,7 @@ def main():
 
     run_parser = subparsers.add_parser("run", help="Run an agent")
     run_parser.add_argument("agent", choices=list(AGENTS.keys()), help="Agent to run")
-    run_parser.add_argument("--llm", type=str, choices=list(LLM_PROVIDERS.keys()), default="ollama", help=f"LLM provider (default: ollama)")
+    run_parser.add_argument("--llm", "-p", type=str, choices=list(LLM_PROVIDERS.keys()), default="ollama", help=f"LLM provider (default: ollama)")
     run_parser.add_argument("--goal", "-g", type=str, default=None, help="Single goal (interactive mode if omitted)")
     run_parser.add_argument("--model", "-m", type=str, default=None, help=f"Override model (default: provider's default model)")
     run_parser.add_argument("--ollama-url", type=str, default=None, help=f"Override Ollama URL (default: {OLLAMA_URL})")
